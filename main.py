@@ -1,7 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
-from PIL import Image, ImageTk, ImageDraw
-import cv2
+from PIL import Image, ImageTk, ImageDraw, ImageOps
 import numpy as np
 
 class AnnotationTool:
@@ -41,6 +40,7 @@ class AnnotationTool:
         self.rect_color = "red"
         self.freehand_color = "blue"
         self.scale = 1.0
+        self.rotation = 0  # Rotation angle in degrees
 
         # Create menus
         self.menubar = tk.Menu(root)
@@ -76,12 +76,13 @@ class AnnotationTool:
         # Store freehand drawings separately
         self.freehand_drawings = []
 
-        # Zoom controls
+        # Zoom and Rotate buttons
         self.zoom_in_button = tk.Button(root, text="Zoom In", command=self.zoom_in)
-        self.zoom_in_button.pack(side=tk.BOTTOM, pady=5)
-
+        self.zoom_in_button.pack(side=tk.LEFT, padx=5, pady=5)
         self.zoom_out_button = tk.Button(root, text="Zoom Out", command=self.zoom_out)
-        self.zoom_out_button.pack(side=tk.BOTTOM, pady=5)
+        self.zoom_out_button.pack(side=tk.LEFT, padx=5, pady=5)
+        self.rotate_button = tk.Button(root, text="Rotate 90°", command=self.rotate_image)
+        self.rotate_button.pack(side=tk.LEFT, padx=5, pady=5)
 
     def open_image(self):
         file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg;*.jpeg;*.png")])
@@ -89,24 +90,13 @@ class AnnotationTool:
             return
         self.image = Image.open(file_path)
         self.original_image = self.image.copy()  # Keep a copy of the original image
-        self.fit_image_to_canvas()
+        self.tk_image = ImageTk.PhotoImage(self.image)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
         self.rect = None
         self.labels = []
         self.freehand_drawings = []
         self.freehand_labels = []  # Clear previous freehand labels
-
-    def fit_image_to_canvas(self):
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
-        img_width, img_height = self.image.size
-
-        scale = min(canvas_width / img_width, canvas_height / img_height)
-        new_size = (int(img_width * scale), int(img_height * scale))
-        resized_image = self.image.resize(new_size, Image.ANTIALIAS)
-
-        self.tk_image = ImageTk.PhotoImage(resized_image)
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
-        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
 
     def on_click(self, event):
         if self.freehand_mode:
@@ -240,18 +230,42 @@ class AnnotationTool:
         if event.delta < 0:
             factor = 1 / factor
         self.scale *= factor
+        self.zoom_image(factor)
         self.canvas.scale("all", event.x, event.y, factor, factor)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
 
     def zoom_in(self):
         self.scale *= 1.1
+        self.zoom_image(1.1)
         self.canvas.scale("all", 0, 0, 1.1, 1.1)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
 
     def zoom_out(self):
-        self.scale /= 1.1
+        self.scale *= 0.9
+        self.zoom_image(0.9)
         self.canvas.scale("all", 0, 0, 0.9, 0.9)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
+
+    def zoom_image(self, factor):
+        if not self.image:
+            return
+        new_size = (int(self.image.width * factor), int(self.image.height * factor))
+        self.image = self.original_image.resize(new_size, Image.LANCZOS)
+        self.tk_image = ImageTk.PhotoImage(self.image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+
+    def rotate_image(self):
+        if not self.image:
+            messagebox.showwarning("Warning", "No image to rotate.")
+            return
+        self.rotation = (self.rotation + 90) % 360
+        self.image = self.original_image.rotate(self.rotation, expand=True)
+        self.tk_image = ImageTk.PhotoImage(self.image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
 
 if __name__ == "__main__":
     root = tk.Tk()
