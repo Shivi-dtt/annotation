@@ -1,8 +1,6 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser
 from PIL import Image, ImageTk, ImageDraw
-import cv2
-import numpy as np
 
 class AnnotationTool:
     def __init__(self, root):
@@ -25,7 +23,9 @@ class AnnotationTool:
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<B1-Motion>", self.on_freehand_draw, add="+")
         self.canvas.bind("<MouseWheel>", self.on_zoom)
+        self.root.bind("<Control-z>", self.undo)
 
+        # Initialize state
         self.rect = None
         self.start_x = None
         self.start_y = None
@@ -35,12 +35,14 @@ class AnnotationTool:
         self.image = None
         self.tk_image = None
         self.original_image = None
+        self.current_image = None
         self.labels = []
         self.freehand_labels = []
         self.font_color = "black"
         self.rect_color = "red"
         self.freehand_color = "blue"
         self.scale = 1.0
+        self.rotation = 0  # Rotation angle in degrees
 
         # Create menus
         self.menubar = tk.Menu(root)
@@ -73,40 +75,32 @@ class AnnotationTool:
         self.freehand_button = tk.Button(root, text="Toggle Freehand Mode", command=self.toggle_freehand_mode)
         self.freehand_button.pack(side=tk.BOTTOM, pady=5)
 
-        # Store freehand drawings separately
-        self.freehand_drawings = []
-
-        # Zoom controls
+        # Zoom and Rotate buttons
         self.zoom_in_button = tk.Button(root, text="Zoom In", command=self.zoom_in)
-        self.zoom_in_button.pack(side=tk.BOTTOM, pady=5)
-
+        self.zoom_in_button.pack(side=tk.LEFT, padx=5, pady=5)
         self.zoom_out_button = tk.Button(root, text="Zoom Out", command=self.zoom_out)
-        self.zoom_out_button.pack(side=tk.BOTTOM, pady=5)
+        self.zoom_out_button.pack(side=tk.LEFT, padx=5, pady=5)
+        self.rotate_button = tk.Button(root, text="Rotate 90°", command=self.rotate_image)
+        self.rotate_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Undo stack
+        self.undo_stack = []
 
     def open_image(self):
         file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg;*.jpeg;*.png")])
         if not file_path:
             return
-        self.image = Image.open(file_path)
-        self.original_image = self.image.copy()  # Keep a copy of the original image
-        self.fit_image_to_canvas()
-        self.rect = None
-        self.labels = []
-        self.freehand_drawings = []
-        self.freehand_labels = []  # Clear previous freehand labels
-
-    def fit_image_to_canvas(self):
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
-        img_width, img_height = self.image.size
-
-        scale = min(canvas_width / img_width, canvas_height / img_height)
-        new_size = (int(img_width * scale), int(img_height * scale))
-        resized_image = self.image.resize(new_size, Image.ANTIALIAS)
-
-        self.tk_image = ImageTk.PhotoImage(resized_image)
+        self.original_image = Image.open(file_path)
+        self.current_image = self.original_image.copy()
+        self.tk_image = ImageTk.PhotoImage(self.current_image)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
         self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+        self.rect = None
+        self.labels = []
+        self.freehand_labels = []  # Clear previous freehand labels
+        self.scale = 1.0
+        self.rotation = 0
+        self.undo_stack.clear()
 
     def on_click(self, event):
         if self.freehand_mode:
@@ -117,6 +111,7 @@ class AnnotationTool:
         self.start_y = self.canvas.canvasy(event.y)
         self.rect_id = self.canvas.create_rectangle(self.start_x, self.start_y, self.start_x, self.start_y,
                                                    outline=self.rect_color)
+        self.save_state()
 
     def on_drag(self, event):
         if self.freehand_mode:
@@ -124,6 +119,7 @@ class AnnotationTool:
         cur_x = self.canvas.canvasx(event.x)
         cur_y = self.canvas.canvasy(event.y)
         self.canvas.coords(self.rect_id, self.start_x, self.start_y, cur_x, cur_y)
+        self.save_state()
 
     def on_freehand_draw(self, event):
         if not self.freehand_mode:
@@ -136,9 +132,10 @@ class AnnotationTool:
             cur_x = self.canvas.canvasx(event.x)
             cur_y = self.canvas.canvasy(event.y)
             line_id = self.canvas.create_line(self.prev_x, self.prev_y, cur_x, cur_y, fill=self.freehand_color, width=2)
-            self.freehand_drawings.append(line_id)
+            self.freehand_labels.append((line_id, self.freehand_color))  # Track the color too
             self.prev_x = cur_x
             self.prev_y = cur_y
+        self.save_state()
 
     def on_freehand_draw_release(self, event):
         self.drawing = False
@@ -150,22 +147,25 @@ class AnnotationTool:
                 self.labels.append((self.rect_id, label))
                 self.label_entry.delete(0, tk.END)
                 self.canvas.create_text(self.start_x, self.start_y - 10, text=label, fill=self.font_color)
+                self.save_state()
             else:
                 messagebox.showwarning("Warning", "Please enter a label.")
         elif self.freehand_mode:
-            # Optionally handle labeling freehand drawings
             label = self.label_entry.get()
             if label:
-                self.freehand_labels.append((self.freehand_drawings[-1], label))  # Label the last freehand drawing
-                self.label_entry.delete(0, tk.END)
-                # Create label for the last freehand drawing (simplified approach)
-                x, y = self.canvas.coords(self.freehand_drawings[-1])[0:2]
-                self.canvas.create_text(x, y - 10, text=label, fill=self.font_color)
+                if self.freehand_labels:
+                    last_line_id = self.freehand_labels[-1][0]
+                    self.freehand_labels[-1] = (last_line_id, label)  # Label the last freehand drawing
+                    self.label_entry.delete(0, tk.END)
+                    coords = self.canvas.coords(last_line_id)
+                    x, y = coords[0:2]
+                    self.canvas.create_text(x, y - 10, text=label, fill=self.font_color)
+                    self.save_state()
             else:
                 messagebox.showwarning("Warning", "Please enter a label.")
 
     def save_annotations(self):
-        if not self.image:
+        if not self.current_image:
             messagebox.showwarning("Warning", "No image to save annotations.")
             return
         annotations = []
@@ -191,12 +191,12 @@ class AnnotationTool:
         messagebox.showinfo("Info", "Annotations saved.")
 
     def save_image(self):
-        if not self.image:
+        if not self.current_image:
             messagebox.showwarning("Warning", "No image to save.")
             return
 
         # Draw annotations on the image
-        draw = ImageDraw.Draw(self.image)
+        draw = ImageDraw.Draw(self.current_image)
         for rect_id, label in self.labels:
             coords = self.canvas.coords(rect_id)
             draw.rectangle(coords, outline=self.rect_color, width=2)
@@ -213,7 +213,7 @@ class AnnotationTool:
                                                filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg")])
         if not file_path:
             return
-        self.image.save(file_path)
+        self.current_image.save(file_path)
         messagebox.showinfo("Info", "Image saved with annotations.")
 
     def choose_font_color(self):
@@ -240,18 +240,75 @@ class AnnotationTool:
         if event.delta < 0:
             factor = 1 / factor
         self.scale *= factor
+        self.zoom_image(factor)
         self.canvas.scale("all", event.x, event.y, factor, factor)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
+        self.save_state()
 
     def zoom_in(self):
         self.scale *= 1.1
+        self.zoom_image(1.1)
         self.canvas.scale("all", 0, 0, 1.1, 1.1)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
+        self.save_state()
 
     def zoom_out(self):
-        self.scale /= 1.1
+        self.scale *= 0.9
+        self.zoom_image(0.9)
         self.canvas.scale("all", 0, 0, 0.9, 0.9)
         self.canvas.configure(scrollregion=self.canvas.bbox(tk.ALL))
+        self.save_state()
+
+    def zoom_image(self, factor):
+        if not self.current_image:
+            return
+        new_size = (int(self.current_image.width * factor), int(self.current_image.height * factor))
+        self.current_image = self.current_image.resize(new_size, Image.LANCZOS)
+        self.tk_image = ImageTk.PhotoImage(self.current_image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+
+    def rotate_image(self):
+        if not self.current_image:
+            messagebox.showwarning("Warning", "No image to rotate.")
+            return
+        self.rotation = (self.rotation + 90) % 360
+        self.current_image = self.original_image.rotate(self.rotation, expand=True)
+        self.zoom_image(self.scale)
+        self.tk_image = ImageTk.PhotoImage(self.current_image)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
+        self.save_state()
+
+    def save_state(self):
+        # Save the current state to the undo stack
+        self.undo_stack.append((
+            self.canvas.find_all(),
+            self.labels.copy(),
+            self.freehand_labels.copy(),
+            self.scale,
+            self.rotation,
+            self.original_image.copy(),  # Save a copy of the original image
+            self.current_image.copy()    # Save a copy of the current image
+        ))
+
+    def undo(self, event=None):
+        if not self.undo_stack:
+            return
+        # Restore the last state from the undo stack
+        all_items, labels, freehand_labels, scale, rotation, original_image, current_image = self.undo_stack.pop()
+        self.canvas.delete("all")
+        self.labels = labels
+        self.freehand_labels = freehand_labels
+        self.scale = scale
+        self.rotation = rotation
+        self.original_image = original_image
+        self.current_image = current_image
+        self.tk_image = ImageTk.PhotoImage(self.current_image)
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
 
 if __name__ == "__main__":
     root = tk.Tk()
